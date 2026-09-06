@@ -1,0 +1,23 @@
+# Modelo. A senha real NÃO entra no git — ver scripts/instalar-painel.sh, que gera o arquivo final
+# em /etc/grafana-allwatcher/provisioning/datasources/watchdog.yaml lendo /root/.zapzoi-monitor.env.
+#
+# Aponta para 127.0.0.1 porque o Grafana roda em rede host. O hub_postgres não publica porta
+# nenhuma e não seria alcançável daqui — o que é justamente o desenho: o painel lê o banco do
+# vigia, nunca o do provedor.
+apiVersion: 1
+datasources:
+  - name: ZOI Watchdog
+    uid: zoi-watchdog
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: 127.0.0.1:5432
+    database: watchdog
+    user: grafana_tv
+    isDefault: false
+    editable: false
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: "SENHA_AQUI"

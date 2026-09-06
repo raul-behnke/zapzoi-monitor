@@ -1,0 +1,220 @@
+{
+  "uid": "zoi-hub-tv",
+  "title": "ZOI Hub — Painel de TV",
+  "tags": ["tv", "zoi-hub"],
+  "timezone": "America/Sao_Paulo",
+  "editable": true,
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "ALERTAS ATIVOS",
+      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::int AS valor FROM estado WHERE estado = 'ALERTA'"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "value",
+        "colorMode": "background",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [{ "type": "value", "options": { "0": { "text": "TUDO OK", "index": 0 } } }],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "VIGIA — minutos desde a última verificação",
+      "description": "O watchdog não vigia a si mesmo. Se este número passar de 12, o resto da tela está mostrando dado velho e não deve ser acreditado.",
+      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(round(EXTRACT(EPOCH FROM (now() - max(rodou_em))) / 60)::int, 999) AS valor FROM execucao"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "value",
+        "colorMode": "background",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 8 },
+              { "color": "red", "value": 12 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "NÚMEROS FORA DO AR",
+      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*)::int AS valor FROM conexao_snapshot WHERE status <> 'CONNECTED'"
+        }
+      ],
+      "options": {
+        "graphMode": "none",
+        "textMode": "value",
+        "colorMode": "background",
+        "justifyMode": "center",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "mappings": [{ "type": "value", "options": { "0": { "text": "TODOS NO AR", "index": 0 } } }],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "Alertas ativos — mais antigos primeiro",
+      "description": "Mais velho no topo de propósito: alerta que dura é alerta que ninguém tratou.",
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT assunto AS \"Alerta\", (date_trunc('minute', now() - desde))::text AS \"Há\" FROM estado WHERE estado = 'ALERTA' ORDER BY desde ASC"
+        }
+      ],
+      "options": { "showHeader": true, "cellHeight": "lg" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Alerta" },
+            "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-text" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Conexões — problema primeiro",
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT rotulo AS \"Número\", status AS \"Estado\", coalesce((date_trunc('minute', now() - ultimo_inbound_em))::text, 'nunca recebeu') AS \"Sem receber há\" FROM conexao_snapshot ORDER BY (status <> 'CONNECTED') DESC, ultimo_inbound_em ASC NULLS FIRST"
+        }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Estado" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "CONNECTED": { "text": "no ar", "color": "green", "index": 0 } } },
+                  { "type": "value", "options": { "DISCONNECTED": { "text": "FORA", "color": "red", "index": 1 } } },
+                  { "type": "value", "options": { "PENDING_QR": { "text": "AGUARDA QR", "color": "orange", "index": 2 } } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "Últimos avisos e erros da API",
+      "description": "Só o campo msg do log. O payload não é gravado: a TV fica numa sala e log de erro carrega telefone de cliente.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "zoi-watchdog" },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT to_char(ocorrido_em AT TIME ZONE 'America/Sao_Paulo', 'DD/MM HH24:MI') AS \"Quando\", CASE WHEN nivel >= 50 THEN 'ERRO' ELSE 'aviso' END AS \"Nível\", mensagem AS \"Mensagem\" FROM erro ORDER BY ocorrido_em DESC LIMIT 12"
+        }
+      ],
+      "options": { "showHeader": true, "cellHeight": "sm" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "left" } },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Nível" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "ERRO": { "color": "red", "index": 0 } } },
+                  { "type": "value", "options": { "aviso": { "color": "orange", "index": 1 } } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
