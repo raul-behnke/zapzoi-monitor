@@ -139,6 +139,38 @@ conferir "resolvido grava OK" \
   && passou "resolvido apaga a marca de antirruído" \
   || falhou "resolvido apaga a marca de antirruído" "marca ausente" "marca presente"
 
+echo "bater_ponto() e podar()"
+
+# ---- 10. heartbeat grava ----------------------------------------------------
+
+bater_ponto
+conferir "bater_ponto grava uma execução" "1" "$(psql_teste "SELECT count(*) FROM execucao")"
+
+# ---- 11. heartbeat é a última linha do script -------------------------------
+#
+# A posição é o sinal inteiro: gravado antes das checagens, ele diria "rodou" para um ciclo que
+# morreu no meio — e a TV mostraria dado velho como se fosse atual, que é a única falha capaz de
+# transformar o painel numa mentira em vez de num alerta ausente.
+
+ultima=$(grep -vE '^\s*(#|$)' "$RAIZ/scripts/zoi-watchdog.sh" | tail -1 | tr -d ' ')
+conferir "bater_ponto é a última linha executável" "bater_ponto" "$ultima"
+
+# ---- 12. poda respeita a janela de 7 dias -----------------------------------
+
+psql_teste "INSERT INTO erro (ocorrido_em, nivel, mensagem) VALUES (now() - interval '8 days', 50, 'velho')" >/dev/null
+psql_teste "INSERT INTO erro (ocorrido_em, nivel, mensagem) VALUES (now(), 50, 'novo')" >/dev/null
+podar
+conferir "podar apaga o que passou de 7 dias" "0" "$(psql_teste "SELECT count(*) FROM erro WHERE mensagem='velho'")"
+conferir "podar preserva o que está dentro da janela" "1" "$(psql_teste "SELECT count(*) FROM erro WHERE mensagem='novo'")"
+
+# ---- 13. erro não guarda payload --------------------------------------------
+#
+# A TV fica numa sala. Log de erro do Hub carrega telefone de cliente final, e a garantia de que
+# ele não aparece na parede é a coluna não existir.
+
+conferir "tabela erro não tem coluna de payload" "0" \
+  "$(psql_teste "SELECT count(*) FROM information_schema.columns WHERE table_name='erro' AND column_name='bruto'")"
+
 # ---- resultado --------------------------------------------------------------
 
 rm -rf "$ESTADO_DIR_TESTE"

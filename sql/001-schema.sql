@@ -43,13 +43,16 @@ CREATE TABLE IF NOT EXISTS estado (
 --
 -- Existe porque `docker logs` é efêmero e morre no deploy. No diagnóstico de 2026-09-05 só havia
 -- 2h de histórico porque o contêiner tinha sido recriado — justamente a janela que interessava.
+-- Guarda `msg` e nível, e NÃO o payload da linha. A TV fica numa sala: log de erro do Hub carrega
+-- telefone de cliente final, e o que não é gravado não vaza pela parede. Para depurar de verdade
+-- existe o `hub-logs`, que fala com o contêiner e não com esta tabela.
 CREATE TABLE IF NOT EXISTS erro (
   id           bigserial PRIMARY KEY,
   ocorrido_em  timestamptz NOT NULL,
   nivel        int NOT NULL,
-  mensagem     text NOT NULL,
-  bruto        jsonb
+  mensagem     text NOT NULL
 );
+ALTER TABLE erro DROP COLUMN IF EXISTS bruto;
 
 -- A janela de coleta (5 min) é do tamanho do intervalo do cron, para não abrir buraco entre
 -- ciclos. O custo é duplicata na fronteira, e é este índice que a desfaz.

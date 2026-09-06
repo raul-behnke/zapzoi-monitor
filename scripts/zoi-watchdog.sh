@@ -105,6 +105,129 @@ alertar() {
 
 resolvido() { rm -f "$ESTADO/$1"; registrar "$1" OK "" ""; }
 
+# Atalho para as funções abaixo: todas gravam no banco do painel e nenhuma pode derrubar o ciclo.
+watchdog_psql() { timeout 10 sudo -u postgres psql -d "$WATCHDOG_DB" -q -v ON_ERROR_STOP=1 "$@" >/dev/null 2>&1; return 0; }
+
+# Erros do log da API para o painel de rodapé.
+#
+# Existe porque `docker logs` é efêmero e morre no deploy. No diagnóstico de 2026-09-05 havia só 2h
+# de histórico porque o contêiner tinha sido recriado — justamente a janela que interessava.
+#
+# `python3` e não `jq`: o servidor tem o primeiro e não o segundo, e instalar pacote para ler JSON
+# num script de cron é dependência nova a manter para sempre.
+#
+# Nível 40 (aviso) entra junto com 50 e 60. Não é ruído: os sinais que precederam o incidente de
+# 2026-09-05 eram todos avisos — "sem inbound anterior" e as rejeições de merge. Erro de verdade a
+# API quase não produz (zero em 24h medido em 2026-09-06), e um painel que só mostra 50+ ficaria
+# permanentemente vazio, que é o mesmo que não existir.
+coletar_erros() {
+  local conteiner="$1"
+  local tsv
+  tsv=$(mktemp) || return 0
+
+  # Janela maior que o intervalo do cron de propósito, para não abrir buraco entre ciclos. O custo
+  # é duplicata na fronteira, desfeita pelo índice único de `erro`.
+  docker logs --since 6m "$conteiner" 2>&1 | python3 -c '
+import sys, json, datetime
+
+for linha in sys.stdin:
+    linha = linha.strip()
+    if not linha.startswith("{"):
+        continue
+    try:
+        d = json.loads(linha)
+    except ValueError:
+        continue
+    nivel = d.get("level")
+    if not isinstance(nivel, int) or nivel < 40:
+        continue
+    ms = d.get("time")
+    if not isinstance(ms, (int, float)):
+        continue
+    quando = datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).isoformat()
+    # Só `msg`. O resto da linha carrega telefone de cliente e não entra no banco que a parede lê.
+    msg = str(d.get("msg", ""))[:500].replace("\t", " ").replace("\n", " ").replace("\\", " ")
+    if not msg:
+        continue
+    print(f"{quando}\t{nivel}\t{msg}")
+' > "$tsv" 2>/dev/null
+
+  if [ -s "$tsv" ]; then
+    # Tabela temporária + ON CONFLICT DO NOTHING: `\copy` sozinho não sabe ignorar duplicata, e a
+    # duplicata é garantida pela janela sobreposta.
+    watchdog_psql <<SQL
+CREATE TEMP TABLE tmp_erro (ocorrido_em timestamptz, nivel int, mensagem text);
+\copy tmp_erro FROM '$tsv'
+INSERT INTO erro (ocorrido_em, nivel, mensagem)
+SELECT ocorrido_em, nivel, mensagem FROM tmp_erro
+ON CONFLICT DO NOTHING;
+SQL
+  fi
+  rm -f "$tsv"
+  return 0
+}
+
+# Foto das conexões para a grade do painel.
+#
+# Copiada para o banco do vigia, e não lida do Hub na hora: assim o Grafana nunca abre conexão com
+# o banco do provedor. A leitura do Hub acontece só aqui, e só SELECT — pelo mesmo `docker exec`
+# que a checagem 3 já usava.
+coletar_conexoes() {
+  local tsv
+  tsv=$(mktemp) || return 0
+
+  docker exec hub_postgres psql -U postgres -d hub -tA -F$'\t' -c "
+    SELECT c.id,
+           coalesce(nullif(c.label, ''), c.\"whatsappNumber\"),
+           c.\"whatsappNumber\",
+           c.status,
+           (SELECT max(m.\"createdAt\")
+              FROM \"MessageLog\" m
+             WHERE m.\"connectionId\" = c.id AND m.direction = 'INBOUND')
+      FROM \"Connection\" c" 2>/dev/null | grep -E '^[0-9a-f-]{36}\t' > "$tsv"
+
+  if [ -s "$tsv" ]; then
+    watchdog_psql <<SQL
+CREATE TEMP TABLE tmp_conexao (connection_id text, rotulo text, numero text, status text, ultimo_inbound_em timestamptz);
+\copy tmp_conexao FROM '$tsv' NULL ''
+INSERT INTO conexao_snapshot (connection_id, rotulo, numero, status, ultimo_inbound_em, medido_em)
+SELECT connection_id, rotulo, numero, status, ultimo_inbound_em, now() FROM tmp_conexao
+ON CONFLICT (connection_id) DO UPDATE SET
+  rotulo            = EXCLUDED.rotulo,
+  numero            = EXCLUDED.numero,
+  status            = EXCLUDED.status,
+  ultimo_inbound_em = EXCLUDED.ultimo_inbound_em,
+  medido_em         = EXCLUDED.medido_em;
+-- Conexão apagada no Hub some da grade. Sem isto ela ficaria para sempre na parede, verde e
+-- inexistente.
+DELETE FROM conexao_snapshot WHERE medido_em < now() - interval '1 hour';
+SQL
+  fi
+  rm -f "$tsv"
+  return 0
+}
+
+# Retenção. Sem isto as duas tabelas crescem para sempre num servidor onde o disco já é vigiado
+# pela checagem 4 deste mesmo script.
+podar() {
+  watchdog_psql -c "DELETE FROM erro WHERE ocorrido_em < now() - interval '7 days'; DELETE FROM execucao WHERE rodou_em < now() - interval '7 days';"
+  return 0
+}
+
+# HEARTBEAT — a peça que impede o painel de mentir.
+#
+# O watchdog não consegue vigiar a si mesmo. Se o cron parar, ou se o script morrer no meio, a
+# última foto gravada permanece — e uma TV toda verde alimentada por dado velho é pior que TV
+# apagada, porque AFIRMA saúde em vez de admitir ignorância. O Grafana pinta tudo de vermelho se
+# `max(rodou_em)` passar de 12 minutos.
+#
+# Chamada na ÚLTIMA linha do script, nunca antes: gravada no começo, ela diria "rodou" para um
+# ciclo que abortou na terceira checagem — exatamente a mentira que ela existe para impedir.
+bater_ponto() {
+  watchdog_psql -c "INSERT INTO execucao (rodou_em) VALUES (now());"
+  return 0
+}
+
 # Daqui para baixo é o ciclo de checagens. O test-watchdog.sh carrega só as funções acima: sem esta
 # linha, um `source` dispararia as checagens contra produção — mandando e-mail de verdade e mexendo
 # no estado real só por ter sido importado.
@@ -333,3 +456,16 @@ for c in hub_api_$COR evolution_go; do
     resolvido log-furado-$c
   fi
 done
+
+# --- alimentação do painel ---------------------------------------------------
+#
+# Depois de TODAS as checagens, e nesta ordem. Nada aqui alerta nem manda e-mail: só alimenta a
+# tela. Uma falha em qualquer uma delas é engolida de propósito — o painel pode ficar defasado, a
+# vigilância não pode parar por causa dele.
+
+[ -n "$COR" ] && coletar_erros "hub_api_$COR"
+coletar_conexoes
+podar
+
+# ÚLTIMA LINHA DO SCRIPT. Ver o comentário de bater_ponto(): a posição é o que dá sentido ao sinal.
+bater_ponto
