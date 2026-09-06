@@ -108,6 +108,20 @@ resolvido() { rm -f "$ESTADO/$1"; registrar "$1" OK "" ""; }
 # Atalho para as funções abaixo: todas gravam no banco do painel e nenhuma pode derrubar o ciclo.
 watchdog_psql() { timeout 10 sudo -u postgres psql -d "$WATCHDOG_DB" -q -v ON_ERROR_STOP=1 "$@" >/dev/null 2>&1; return 0; }
 
+# Arquivo temporário que o psql consegue ler.
+#
+# `\copy` é comando do CLIENTE: quem abre o arquivo é o psql, que roda como `postgres` por causa do
+# `sudo -u`. O `mktemp` cria 0600 pertencente ao root, e o resultado era `Permission denied` que o
+# `>/dev/null 2>&1` do watchdog_psql engolia — a grade ficava vazia sem uma linha de erro. Duas
+# armadilhas diferentes (esta e o `\t` do grep) com o mesmo sintoma, que é o motivo de o teste 14
+# ser integração de verdade em vez de entrada simulada.
+tmp_legivel() {
+  local f
+  f=$(mktemp) || return 1
+  chmod 0644 "$f"
+  printf '%s' "$f"
+}
+
 # Erros do log da API para o painel de rodapé.
 #
 # Existe porque `docker logs` é efêmero e morre no deploy. No diagnóstico de 2026-09-05 havia só 2h
@@ -123,7 +137,7 @@ watchdog_psql() { timeout 10 sudo -u postgres psql -d "$WATCHDOG_DB" -q -v ON_ER
 coletar_erros() {
   local conteiner="$1"
   local tsv
-  tsv=$(mktemp) || return 0
+  tsv=$(tmp_legivel) || return 0
 
   # Janela maior que o intervalo do cron de propósito, para não abrir buraco entre ciclos. O custo
   # é duplicata na fronteira, desfeita pelo índice único de `erro`.
@@ -174,7 +188,7 @@ SQL
 # que a checagem 3 já usava.
 coletar_conexoes() {
   local tsv
-  tsv=$(mktemp) || return 0
+  tsv=$(tmp_legivel) || return 0
 
   docker exec hub_postgres psql -U postgres -d hub -tA -F$'\t' -c "
     SELECT c.id,
