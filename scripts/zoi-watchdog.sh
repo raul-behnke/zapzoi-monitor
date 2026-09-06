@@ -184,7 +184,12 @@ coletar_conexoes() {
            (SELECT max(m.\"createdAt\")
               FROM \"MessageLog\" m
              WHERE m.\"connectionId\" = c.id AND m.direction = 'INBOUND')
-      FROM \"Connection\" c" 2>/dev/null | grep -E '^[0-9a-f-]{36}\t' > "$tsv"
+      FROM \"Connection\" c" 2>/dev/null \
+    | grep -E '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' > "$tsv"
+  # O filtro ancora no formato do UUID e NÃO na tabulação que separa as colunas: `grep -E` não
+  # interpreta `\t`, e a versão que tentava isso descartava todas as linhas em silêncio — a grade
+  # ficava vazia sem erro nenhum, que é o modo de falhar que este repositório inteiro combate.
+  # Serve para descartar o rodapé do psql e qualquer aviso que escape para o stdout.
 
   if [ -s "$tsv" ]; then
     watchdog_psql <<SQL

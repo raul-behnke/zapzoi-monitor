@@ -171,6 +171,28 @@ conferir "podar preserva o que está dentro da janela" "1" "$(psql_teste "SELECT
 conferir "tabela erro não tem coluna de payload" "0" \
   "$(psql_teste "SELECT count(*) FROM information_schema.columns WHERE table_name='erro' AND column_name='bruto'")"
 
+echo "coletar_conexoes()"
+
+# ---- 14. a grade sai povoada ------------------------------------------------
+#
+# Integração de verdade contra o hub_postgres, e não simulação: a primeira versão descartava TODAS
+# as linhas porque `grep -E` não interpreta `\t`, e a grade ficava vazia sem erro nenhum. Um teste
+# com entrada falsa teria passado — o defeito estava exatamente no pedaço que fala com o Hub.
+
+coletar_conexoes
+linhas=$(psql_teste "SELECT count(*) FROM conexao_snapshot")
+[ "${linhas:-0}" -gt 0 ] \
+  && passou "coletar_conexoes povoa a grade ($linhas conexões)" \
+  || falhou "coletar_conexoes povoa a grade" "mais que 0" "$linhas"
+
+# ---- 15. a leitura do provedor é só leitura ---------------------------------
+#
+# A restrição do projeto: a estrutura do provedor não é tocada. O banco do Hub entra apenas por
+# SELECT, e este teste falha se alguém acrescentar escrita.
+
+escritas=$(grep -cE 'docker exec hub_postgres psql.*(INSERT|UPDATE|DELETE|ALTER|CREATE|DROP)' "$RAIZ/scripts/zoi-watchdog.sh")
+conferir "nenhuma escrita no banco do provedor" "0" "$escritas"
+
 # ---- resultado --------------------------------------------------------------
 
 rm -rf "$ESTADO_DIR_TESTE"
