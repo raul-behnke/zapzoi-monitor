@@ -29,17 +29,43 @@ source "$ENV_FILE"
 python3 -c "import json,sys; json.load(open('$REPO_DIR/grafana/zoi-hub-tv.json'))" \
   || erro "grafana/zoi-hub-tv.json não é JSON válido"
 
-umask 077
 sed "s|SENHA_AQUI|$GRAFANA_TV_PASSWORD|" \
   "$REPO_DIR/grafana/datasource-watchdog.yaml.exemplo" > "$PROV_DS/watchdog.yaml" \
   || erro "falhou ao escrever $PROV_DS/watchdog.yaml"
 
-umask 022
+# DONO E MODO COPIADOS DO ARQUIVO QUE JÁ FUNCIONA, nunca escolhidos aqui.
+#
+# O arquivo tem senha, então 0600 está certo — mas 0600 pertencente ao ROOT é ilegível para o
+# usuário do Grafana (uid 472) dentro do contêiner, e o provisionamento não degrada: ele DERRUBA o
+# Grafana em laço de reinício. Em 2026-09-06 isso tirou do ar, por quatro minutos, o Grafana que é
+# compartilhado com o All Watcher. Espelhar o vizinho acerta dono e modo de uma vez, e continua
+# certo se um dia a imagem mudar de uid.
+chown --reference="$PROV_DS/allwatcher.yaml" "$PROV_DS/watchdog.yaml" 2>/dev/null \
+  || erro "não consegui dar a posse de watchdog.yaml ao usuário do Grafana"
+chmod --reference="$PROV_DS/allwatcher.yaml" "$PROV_DS/watchdog.yaml" 2>/dev/null \
+  || erro "não consegui ajustar o modo de watchdog.yaml"
+
 cp "$REPO_DIR/grafana/zoi-hub-tv.json" "$DASH/zoi-hub-tv.json" \
   || erro "falhou ao copiar o dashboard"
+chown --reference="$DASH/allwatcher.json" "$DASH/zoi-hub-tv.json" 2>/dev/null || true
+chmod --reference="$DASH/allwatcher.json" "$DASH/zoi-hub-tv.json" 2>/dev/null || true
 
 # O provisionamento só é lido no boot. `restart` e não `up -d`: o contêiner é preservado.
 docker restart grafana_allwatcher >/dev/null || erro "falhou ao reiniciar o Grafana"
+
+# CONFERIR QUE VOLTOU. Sem isto, um provisionamento inválido deixa o Grafana em laço de reinício e
+# o instalador imprime o link como se tudo tivesse dado certo — inclusive o painel do All Watcher,
+# que é de outra pessoa, teria sumido em silêncio.
+for _ in $(seq 1 30); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3003/api/health)" = "200" ] && break
+  sleep 2
+done
+if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3003/api/health)" != "200" ]; then
+  echo "ERRO: o Grafana não voltou. Últimas linhas:" >&2
+  docker logs --tail 15 grafana_allwatcher 2>&1 | grep -i error >&2
+  echo "Para desfazer: rm -f $PROV_DS/watchdog.yaml $DASH/zoi-hub-tv.json && docker restart grafana_allwatcher" >&2
+  exit 1
+fi
 
 echo "Datasource: $PROV_DS/watchdog.yaml"
 echo "Dashboard:  $DASH/zoi-hub-tv.json"
