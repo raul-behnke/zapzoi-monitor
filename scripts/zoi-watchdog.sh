@@ -14,6 +14,10 @@ set -uo pipefail   # sem -e: um sinal que falha não pode abortar a checagem dos
 
 ESTADO="/var/lib/zoi-watchdog"
 SILENCIO_S=21600   # 6h
+# Banco do painel, no Postgres DO HOST — não no hub_postgres. A estrutura do provedor não é tocada:
+# o banco do Hub segue apenas lido, pelo mesmo `docker exec` de sempre. Variável para que o
+# test-watchdog.sh aponte para um banco descartável.
+WATCHDOG_DB="${WATCHDOG_DB:-watchdog}"
 # Dois limiares, e não um: `wait` é profundidade de fila e `failed` é dano acumulado. Um número só
 # para os dois deixou `bull:inbound-messages:failed = 1` passar calado (medido em 2026-08-05), e
 # job morto não escoa sozinho — ele fica.
@@ -35,9 +39,44 @@ mkdir -p "$ESTADO"
 # ANTIRRUÍDO, e ele é obrigatório, não refinamento: um watchdog que manda e-mail a cada 5 minutos
 # treina todo mundo a filtrar a caixa — e a partir daí ele não existe mais, só consome atenção.
 # Alerta ignorado é pior que nenhum, porque dá sensação de cobertura.
+# Grava o estado da checagem no banco que alimenta o painel. Não substitui o e-mail: enriquece.
+#
+# MELHOR ESFORÇO ABSOLUTO, e o `return 0` no fim é o que garante isso. A regra que o script inteiro
+# segue (`set -uo pipefail` SEM `-e`) é que uma checagem que falha não pode abortar as outras — e
+# aqui vale em dobro, porque o e-mail é o canal que sobrevive ao banco. Um Postgres fora do ar não
+# pode ser o motivo de ninguém ser avisado de que o Postgres está fora do ar.
+#
+# `timeout 5` pelo mesmo motivo: o cron usa `flock -n`, então um psql pendurado não empilha ciclos
+# — ele impede TODOS os seguintes de rodar, e a vigilância para sem que nada acuse.
+#
+# Os valores vão por `-v` e são interpolados com `:'nome'`, que é o psql quem escapa. Nunca por
+# concatenação: o corpo dos alertas é português escrito à mão e já contém aspas hoje.
+registrar() {
+  local chave="$1" est="$2" assunto="${3:-}" corpo="${4:-}"
+  timeout 5 sudo -u postgres psql -d "$WATCHDOG_DB" -q -v ON_ERROR_STOP=1 \
+    -v chave="$chave" -v est="$est" -v assunto="$assunto" -v corpo="$corpo" <<'SQL' >/dev/null 2>&1
+INSERT INTO estado (chave, estado, assunto, corpo, desde, medido_em)
+VALUES (:'chave', :'est', :'assunto', :'corpo', now(), now())
+ON CONFLICT (chave) DO UPDATE SET
+  estado    = EXCLUDED.estado,
+  assunto   = EXCLUDED.assunto,
+  corpo     = EXCLUDED.corpo,
+  -- `desde` só se move quando o estado MUDA. É o que responde "há quanto tempo", que o e-mail
+  -- nunca soube responder: alerta de quatro horas e alerta de quatro minutos pedem reações
+  -- diferentes, e hoje os dois chegam iguais.
+  desde     = CASE WHEN estado.estado = EXCLUDED.estado THEN estado.desde ELSE EXCLUDED.desde END,
+  medido_em = EXCLUDED.medido_em;
+SQL
+  return 0
+}
+
 alertar() {
   local chave="$1" assunto="$2" corpo="$3"
   local marca="$ESTADO/$chave"
+  # ANTES da guarda de antirruído, e isso não é ordem à toa. O e-mail cala por 6h de propósito, mas
+  # o problema segue de pé — e uma TV que apagasse o alerta porque o e-mail já foi mandado mentiria
+  # exatamente durante as 6 horas em que ele mais importa.
+  registrar "$chave" ALERTA "$assunto" "$corpo"
   if [ -f "$marca" ] && [ $(( $(date +%s) - $(stat -c %Y "$marca") )) -lt "$SILENCIO_S" ]; then
     return
   fi
@@ -64,7 +103,12 @@ alertar() {
   rm -f /tmp/zoi-watchdog-resend.json
 }
 
-resolvido() { rm -f "$ESTADO/$1"; }
+resolvido() { rm -f "$ESTADO/$1"; registrar "$1" OK "" ""; }
+
+# Daqui para baixo é o ciclo de checagens. O test-watchdog.sh carrega só as funções acima: sem esta
+# linha, um `source` dispararia as checagens contra produção — mandando e-mail de verdade e mexendo
+# no estado real só por ter sido importado.
+[ "${WATCHDOG_SO_FUNCOES:-}" = "1" ] && return 0
 
 # Cor ativa do blue/green — resolvida UMA VEZ aqui, no topo, e usada o ciclo inteiro. Nunca lida de
 # novo mais abaixo nem guardada entre ciclos: o deploy troca a cor no meio de um ciclo de 5 min, e

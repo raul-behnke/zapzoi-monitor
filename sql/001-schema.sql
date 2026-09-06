@@ -9,17 +9,18 @@
 -- allwatcher. O hub_postgres não publica porta nenhuma, então ele não seria alcançável daqui de
 -- todo modo.
 --
--- Aplicar:
---   sudo -u postgres psql -f sql/001-schema.sql
+-- Aplicar (o 000 cria o banco e o papel):
+--   sudo -u postgres psql -f sql/000-bootstrap.sql
+--   sudo -u postgres psql -d watchdog -f sql/001-schema.sql
+--
+-- Este arquivo NÃO escolhe banco — nem `CREATE DATABASE`, nem `\connect`. Quem escolhe é o `-d` de
+-- quem chama, e é isso que deixa o test-watchdog.sh aplicá-lo num banco descartável. Quando o
+-- `\connect watchdog` morava aqui, o teste criava um banco de teste e mandava as tabelas para
+-- produção sem dizer nada.
 --
 -- Idempotente: pode rodar de novo sem quebrar nada.
 
 \set ON_ERROR_STOP on
-
-SELECT 'CREATE DATABASE watchdog'
-WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'watchdog')\gexec
-
-\connect watchdog
 
 -- Estado atual de cada checagem. Uma linha por chave — não cresce.
 --
@@ -83,27 +84,20 @@ CREATE TABLE IF NOT EXISTS conexao_snapshot (
   medido_em         timestamptz NOT NULL
 );
 
--- Papel de leitura do painel.
+-- Leitura para o painel.
 --
--- Separado do grafana_ro do allwatcher de propósito: bancos diferentes, permissões diferentes, e
--- uma credencial que vaza não deve levar as duas junto.
+-- Condicional porque o banco descartável do teste roda sem o 000, e um GRANT para papel que não
+-- existe abortaria o schema inteiro — o teste morreria antes da primeira asserção.
 --
--- A senha real NÃO mora neste arquivo. Trocar depois de aplicar:
---   sudo -u postgres psql -c "ALTER ROLE grafana_tv PASSWORD '<senha>'"
+-- Só SELECT, e isso é dito de propósito: um painel numa parede não escreve em lugar nenhum, e a
+-- única forma de garantir isso é não conceder o direito.
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_tv') THEN
-    CREATE ROLE grafana_tv LOGIN PASSWORD 'trocar-me';
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'grafana_tv') THEN
+    EXECUTE 'GRANT USAGE ON SCHEMA public TO grafana_tv';
+    EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_tv';
+    EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_tv';
+    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO grafana_tv';
   END IF;
 END
 $$;
-
-GRANT CONNECT ON DATABASE watchdog TO grafana_tv;
-GRANT USAGE ON SCHEMA public TO grafana_tv;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_tv;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO grafana_tv;
-
--- Só leitura, e isso é dito duas vezes de propósito: um painel numa parede não escreve em lugar
--- nenhum, e a única forma de garantir isso é não conceder o direito.
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM grafana_tv;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_tv;

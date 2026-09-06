@@ -35,6 +35,14 @@ sudo -u postgres psql -qc "CREATE DATABASE $DB_TESTE" >/dev/null 2>&1
 # a testar o schema do teste, não o que roda.
 sudo -u postgres psql -q -d "$DB_TESTE" -f "$RAIZ/sql/001-schema.sql" >/dev/null 2>&1
 
+# Se o schema não chegou no banco do teste, toda asserção abaixo mediria o vazio e o teste passaria
+# a reportar falhas que não existem — ou, pior, o arquivo levaria as tabelas para outro banco.
+if [ "$(psql_teste "SELECT to_regclass('estado') IS NOT NULL")" != "t" ]; then
+  echo "ERRO: 001-schema.sql não criou as tabelas em $DB_TESTE" >&2
+  sudo -u postgres psql -qc "DROP DATABASE IF EXISTS $DB_TESTE" >/dev/null 2>&1
+  exit 2
+fi
+
 limpar() { sudo -u postgres psql -qc "DROP DATABASE IF EXISTS $DB_TESTE" >/dev/null 2>&1; }
 trap limpar EXIT
 
@@ -46,6 +54,12 @@ export ESTADO_DIR_TESTE="$(mktemp -d)"
 # shellcheck source=/dev/null
 source "$RAIZ/scripts/zoi-watchdog.sh"
 ESTADO="$ESTADO_DIR_TESTE"
+
+# O source acima leu /root/zoi-hub/.env, que tem a credencial de e-mail de PRODUÇÃO. O teste 7
+# chega perto de alertar() de propósito, e a única coisa que o separa de mandar e-mail de verdade é
+# a guarda de antirruído. Tirar a chave é o cinto de segurança: se um dia essa guarda mudar, o
+# teste falha em vez de escrever para a caixa de alguém.
+unset RESEND_API_KEY
 
 echo "registrar()"
 
